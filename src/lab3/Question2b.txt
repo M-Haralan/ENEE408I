@@ -1,0 +1,7 @@
+OpenCV (segmentation) is much more stiff because there is no training. 
+It's mathematically deterministic. It doesn't require any training/validation datasets, and 
+works just off of any image it's given. This makes it much lighter than YOLO.
+
+YOLO can generalize off of many images given as its training data, and thus is less stiff. It can
+still detect things that don't exactly fit the parameters and also generates confidence scores for it's detections.
+It can be made more accurate with larger datasets
