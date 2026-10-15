@@ -30,17 +30,13 @@ q     : quit
 class TeleopNode(Node):
     def __init__(self):
         super().__init__('part_a_teleop')
-        # self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.lin_vel = 0.0
         self.ang_vel = 0.0
-        self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.settings = termios.tcgetattr(sys.stdin)
         tty.setcbreak(sys.stdin.fileno())
 
         self.create_timer(0.05, self.poll_keys)
-
-    # def scan_callback(self, msg: LaserScan):
-    #     if msg.
 
     def poll_keys(self):
         key = get_key()
