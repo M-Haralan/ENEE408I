@@ -38,6 +38,7 @@ class TeleopNode(Node):
 
         self.create_timer(0.05, self.poll_keys)
 
+
     def poll_keys(self):
         key = get_key()
         if key == 'q' or key == '\x03': # this are our exit keys

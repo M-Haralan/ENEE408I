@@ -8,6 +8,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
+from rclpy.qos import qos_profile_sensor_data
 import numpy as np
 
 MAX_LIN_VEL = 0.22
@@ -39,14 +40,17 @@ q     : quit
 
 class TeleopNode(Node):
     def __init__(self):
-        super().__init__('part_a_teleop')
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.lin_vel = 0.0
         self.ang_vel = 0.0
-        self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        self.front_dist = float('inf')
+        self.last_scan_time = None
+        self.create_subscription(LaserScan, '/scan', self.scan_callback,
+                                 qos_profile_sensor_data)
+
+        # these parts here are to have a non-blocking terminal
         self.settings = termios.tcgetattr(sys.stdin)
         tty.setcbreak(sys.stdin.fileno())
-
         self.create_timer(0.05, self.poll_keys_safe)
 
     def scan_callback(self, msg: LaserScan):
@@ -59,7 +63,7 @@ class TeleopNode(Node):
             if not (msg.range_min <= r <= msg.range_max):
                 continue
             angle = msg.angle_min + i * msg.angle_increment
-            angle = np.atan2(np.sin(angle), np.cos(angle))
+            angle = np.arctan2(np.sin(angle), np.cos(angle))
             if abs(angle) <= FRONT_HALF_ANGLE and r < closest:
                 closest = r
 
@@ -67,9 +71,14 @@ class TeleopNode(Node):
         self.last_scan_time = self.get_clock().now()
 
     def obstacle_ahead(self):
-        # no scan yet or the scan went stale = we're driving blind, so treat it as blocked
-        if self.last_scan_time is None or self.get_clock().now() - self.last_scan_time > SCAN_TIMEOUT:
-            self.get_logger().error("no recent /scan data, holding linear vel at 0 to be safe")
+        if self.last_scan_time is None:
+            stale = True
+        else:
+            age = (self.get_clock().now() - self.last_scan_time).nanoseconds * 1e-9
+            stale = age > SCAN_TIMEOUT
+        if stale:
+            self.get_logger().warn("no recent /scan data, blocking linear motion",
+                                   throttle_duration_sec=2.0)
             return True
         return self.front_dist < SAFETY_DIST
 
