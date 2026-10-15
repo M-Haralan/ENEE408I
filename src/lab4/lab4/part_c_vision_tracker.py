@@ -85,7 +85,7 @@ class VisionTracker(Node):
         super().__init__('turtlebot3_vision_tracker')
 
         # these need to be called from the p
-        self.declare_parameter('image_topic', '/camera/image_raw')
+        self.declare_parameter('image_topic', '/image_raw')
         self.declare_parameter('color', 'blue')
         self.declare_parameter('show_debug', False)
 
@@ -161,7 +161,7 @@ class VisionTracker(Node):
         else:
             # lost it (or never saw it), slow spin to look around
             twist.linear.x = 0.0
-            twist.angular.z = SEARCH_ANG_VEL
+            twist.angular.z = 0.0
             return twist, False
 
     def control_loop(self):
