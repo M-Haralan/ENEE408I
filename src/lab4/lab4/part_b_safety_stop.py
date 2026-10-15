@@ -40,6 +40,7 @@ q     : quit
 
 class TeleopNode(Node):
     def __init__(self):
+        super().__init__('teleop_stop')
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.lin_vel = 0.0
         self.ang_vel = 0.0

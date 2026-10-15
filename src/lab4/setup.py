@@ -25,6 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'teleop = lab4.part_a_teleop:main',
+            'teleop_stop = lab4.part_b_safety_stop:main',
+            'tracking = lab4.part_c_vision_tracker:main'
         ],
     },
 )
