@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-# enee408i lab 4 - part c: chase a colored object w/ the camera
+# enee408i lab 4 - part c: chase a colored object w/ the camera (ROS 2 Humble)
 # pipeline: ros image -> cv_bridge -> bgr -> hsv -> color mask -> biggest contour -> centroid
 # then a p-controller steers to keep the centroid in the middle of the frame while creeping forward.
 # if it can't see the target it just spins slowly until it finds it again
 #
-# params (set them on the command line):
-#   _image_topic:=/some/topic   which camera topic to listen to (check rostopic list)
-#   _color:=red                 red / green / blue / yellow
-#   _show_debug:=true           pops up a window w/ the mask + centroid (needs a display, not over plain ssh)
+# params (set them on the command line with --ros-args -p):
+#   image_topic:=/some/topic    which camera topic to listen to (check ros2 topic list)
+#   color:=red                  red / green / blue / yellow
+#   show_debug:=true            pops up a window w/ the mask + centroid (needs a display, not over plain ssh)
 #
-# ex: rosrun <your_pkg> part_c_vision_tracker.py _color:=green _show_debug:=true
+# ex: python3 part_c_vision_tracker.py --ros-args -p color:=green -p show_debug:=true
+#     (or ros2 run <your_pkg> part_c_vision_tracker --ros-args -p color:=green)
 
-import rospy
+import time
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 import cv2
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
+
 
 # hsv ranges in opencv units (h: 0-179, s/v: 0-255)
 # red wraps around h=0 so it needs two ranges that get or'd together.
@@ -74,38 +80,50 @@ def find_target(mask):
     return cx, cy, area, biggest
 
 
-class VisionTracker:
+class VisionTracker(Node):
     def __init__(self):
-        rospy.init_node('turtlebot3_vision_tracker', anonymous=True)
+        super().__init__('turtlebot3_vision_tracker')
 
-        # real turtlebot3 w/ the pi camera publishes raw frames on /raspicam_node/image
-        # (in gazebo w/ the waffle_pi it's /camera/rgb/image_raw)
-        image_topic = rospy.get_param('~image_topic', '/raspicam_node/image')
-        color = rospy.get_param('~color', 'red').lower()
-        self.show_debug = rospy.get_param('~show_debug', False)
+        # these need to be called from the p
+        self.declare_parameter('image_topic', '/camera/image_raw')
+        self.declare_parameter('color', 'blue')
+        self.declare_parameter('show_debug', False)
+
+        image_topic = self.get_parameter('image_topic').value
+        color = str(self.get_parameter('color').value).lower()
+        self.show_debug = bool(self.get_parameter('show_debug').value)
 
         if color not in COLOR_RANGES:
-            rospy.logwarn("don't know color '%s', falling back to red" % color)
+            self.get_logger().warn("don't know color '%s', falling back to red" % color)
             color = 'red'
         self.ranges = COLOR_RANGES[color]
 
         self.bridge = CvBridge()
-        self.pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
-        # queue_size=1 + big buff_size so we always process the newest frame and don't lag behind
-        rospy.Subscriber(image_topic, Image, self.image_cb, queue_size=1, buff_size=2 ** 24)
+        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # sensor-data qos (best effort, depth 5) so we match camera drivers that publish best effort
+        # and always work on recent frames instead of piling up a backlog
+        self.create_subscription(Image, image_topic, self.image_callback, qos_profile_sensor_data)
 
-        # latest detection as one tuple (err, area_frac, time) so the control loop
+        # latest detection as one tuple (err, area_frac, time_sec) so the control loop
         # never reads half of an old detection and half of a new one
         self.target = None
+        self.was_tracking = None
 
-        rospy.on_shutdown(self.shutdown)
-        rospy.loginfo("tracking %s on %s" % (color, image_topic))
+        # control runs on its own 10 hz timer instead of inside the image callback,
+        # that way the robot still goes into search mode even if frames stop coming in
+        self.create_timer(0.1, self.control_loop)
 
-    def image_cb(self, msg):
+        self.get_logger().info("tracking %s on %s" % (color, image_topic))
+
+    def now_sec(self):
+        return self.get_clock().now().seconds_nanoseconds()[0]
+
+    def image_callback(self, msg: Image):
+        
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except CvBridgeError as e:
-            rospy.logwarn_throttle(2.0, "cv_bridge error: %s" % e)
+            self.get_logger().warn("cv_bridge error: %s" % e, throttle_duration_sec=2.0)
             return
 
         h, w = frame.shape[:2]
@@ -116,7 +134,7 @@ class VisionTracker:
             cx, cy, area, contour = result
             # normalized horizontal error: -1 = far left edge, 0 = dead center, +1 = far right edge
             err = (cx - w / 2.0) / (w / 2.0)
-            self.target = (err, area / float(w * h), rospy.get_time())
+            self.target = (err, area / float(w * h), self.now_sec())
 
         if self.show_debug:
             debug = frame.copy()
@@ -133,7 +151,7 @@ class VisionTracker:
         twist = Twist()
         target = self.target
 
-        if target is not None and rospy.get_time() - target[2] < TARGET_TIMEOUT:
+        if target is not None and self.now_sec() - target[2] < TARGET_TIMEOUT:
             err, area_frac, _ = target
             # p-controller: object right of center (err > 0) -> turn right -> negative angular.z
             # if your camera is mounted flipped and it turns the wrong way, flip this sign
@@ -146,30 +164,38 @@ class VisionTracker:
             twist.angular.z = SEARCH_ANG_VEL
             return twist, False
 
-    def shutdown(self):
+    def control_loop(self):
+        twist, tracking = self.compute_cmd()
+        if tracking != self.was_tracking:
+            self.get_logger().info("target found, tracking" if tracking else "no target, searching")
+            self.was_tracking = tracking
+        self.pub.publish(twist)
+
+    def stop_robot(self):
+        # a single zero twist can get dropped on shutdown, so send a few
         try:
-            self.pub.publish(Twist())
+            for _ in range(3):
+                self.pub.publish(Twist())
+                time.sleep(0.05)
         except Exception:
             pass
         if self.show_debug:
             cv2.destroyAllWindows()
 
-    def run(self):
-        # control runs on its own 10 hz loop instead of inside the image callback,
-        # that way the robot still goes into search mode even if frames stop coming in
-        rate = rospy.Rate(10)
-        was_tracking = None
-        while not rospy.is_shutdown():
-            twist, tracking = self.compute_cmd()
-            if tracking != was_tracking:
-                rospy.loginfo("target found, tracking" if tracking else "no target, searching")
-                was_tracking = tracking
-            self.pub.publish(twist)
-            rate.sleep()
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = VisionTracker()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.stop_robot()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
-    try:
-        VisionTracker().run()
-    except rospy.ROSInterruptException:
-        pass
+    main()
