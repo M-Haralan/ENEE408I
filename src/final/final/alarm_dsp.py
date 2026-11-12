@@ -13,8 +13,10 @@ import wave
 
 import numpy as np
 
-FRAME_S = 0.050          # STFT frame length
-HOP_S = 0.025            # STFT hop
+FRAME = 4096             # STFT window in samples (85.3 ms at 48 kHz, true 11.7 Hz resolution)
+HOP = 1024               # STFT hop in samples (21.3 ms at 48 kHz)
+LEGACY_FRAME_S = 0.050   # only used for templates built before frame/hop were stored in them
+LEGACY_HOP_S = 0.025
 DR_DB = 40.0             # band levels more than this far below the frame's loudest band are clamped
 SIM_SMOOTH = 4           # similarity is averaged over this many frames (100 ms) before thresholding
 NOISE_WINDOW_S = 30.0    # noise floor = 10th percentile of in-band level over this long
@@ -42,10 +44,10 @@ def load_template(path):
 class Features:
     """Per-frame loudness (dB) and a gain-invariant log-band spectrum vector."""
 
-    def __init__(self, sr, n_bands=64, fmin=200.0, fmax=8000.0):
+    def __init__(self, sr, n_bands=64, fmin=200.0, fmax=8000.0, frame=FRAME, hop=HOP):
         self.sr = int(sr)
-        self.frame = int(round(self.sr * FRAME_S))
-        self.hop = int(round(self.sr * HOP_S))
+        self.frame = int(frame)     # window length in samples
+        self.hop = int(hop)         # samples between windows
         self.hop_s = self.hop / float(self.sr)
         self.frame_s = self.frame / float(self.sr)
         self.n_fft = 1 << (self.frame - 1).bit_length()
@@ -124,7 +126,10 @@ class Detector:
 
     def __init__(self, tpl, sim_thr=0.0, margin_db=0.0, window_s=0.0,
                  rearm_s=5.0, warmup_s=5.0, log=False):
-        self.f = Features(tpl["sr"], int(tpl["n_bands"]), float(tpl["fmin"]), float(tpl["fmax"]))
+        sr = int(tpl["sr"])
+        frame = int(tpl["frame"]) if "frame" in tpl else int(round(sr * LEGACY_FRAME_S))
+        hop = int(tpl["hop"]) if "hop" in tpl else int(round(sr * LEGACY_HOP_S))
+        self.f = Features(sr, int(tpl["n_bands"]), float(tpl["fmin"]), float(tpl["fmax"]), frame, hop)
         self.ref = np.asarray(tpl["ref"], dtype=np.float64)
         self.mask = np.asarray(tpl["mask"], dtype=int)
         self.sim_thr = float(sim_thr or tpl["sim_thr"])
@@ -142,6 +147,8 @@ class Detector:
         self.db_hist = collections.deque(maxlen=int(NOISE_WINDOW_S / hop_s))
         self.on_hist = collections.deque(maxlen=int(round(self.window_s / hop_s)))
         self.sims = collections.deque(maxlen=SIM_SMOOTH)
+        self.recent = collections.deque(maxlen=max(1, int(round(1.0 / hop_s))))   # last ~1 s of (sim, matched)
+        self.n_ok = 0                                                              # qualifying buzzes in the window
         self.nframes = 0
         self.armed = True
         self.quiet = 0
@@ -151,6 +158,16 @@ class Detector:
     @property
     def time_s(self):
         return (self.nframes - 1) * self.f.hop_s + self.f.frame_s
+
+    def summary(self):
+        """Last ~1 s at a glance (for debug logging): level, noise floor, best similarity,
+        fraction of frames matched, and how many qualifying buzzes are in the window."""
+        if not self.recent:
+            return None
+        sims = [a for a, _ in self.recent]
+        return dict(level=self.last[0], noise=self.last[1], best_sim=max(sims),
+                    matched=sum(1 for _, b in self.recent if b) / float(len(self.recent)),
+                    buzzes=self.n_ok)
 
     def feed(self, x):
         self.buf = np.concatenate((self.buf, np.asarray(x, dtype=np.int16)))
@@ -176,6 +193,7 @@ class Detector:
             else:
                 good = abs(length - self.seg_len) <= self.seg_tol
             n_ok += int(good)
+        self.n_ok = n_ok
         return n_ok >= self.n_required
 
     def _step(self, frame):
@@ -189,6 +207,7 @@ class Detector:
         loud = db > noise + self.margin_db
         on = bool(loud and sim >= self.sim_thr)
         self.on_hist.append(on)
+        self.recent.append((sim, on))
         self.last = (db, noise, sim, on)
         warm = self.nframes * self.f.hop_s >= self.warmup_s
         if self.log is not None:

@@ -24,8 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'alarm_node = final.alarm_node.py:main',
-            'dstar_nav = dstar_navigation.py:main'
+            'alarm_node = final.alarm_node:main',
+            'dstar_nav = dstar_navigation:main'
         ],
     },
 )

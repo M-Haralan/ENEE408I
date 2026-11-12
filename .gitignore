@@ -1,7 +1,7 @@
-build*
-install*
+build/*
+install/*
 lab_env*
 log*
 *.png
 .vscode*
-
+*__pycache__

@@ -15,7 +15,8 @@ Parameters
     rearm_s                 (float, 5.0) alarm must be gone this long before it can trigger again
     latch                   (bool, false) transient-local QoS: late subscribers also get the last message
     publish_false_on_clear  (bool, false) also publish False once the alarm has stopped
-    debug                   (bool, false) log loudness / noise floor / similarity once a second
+    debug                   (bool, false) once a second: in-band level vs noise floor, best similarity
+                            vs the threshold, % of frames matched, buzzes found in the window
 
 The first 5 s after start-up are used to measure the noise floor; no detection happens then.
 True is published once per alarm episode (the alarm loops, but you only get one message).
@@ -29,7 +30,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
 
-import alarm_dsp
+import final.alarm_dsp as alarm_dsp
 
 
 class AlarmNode(Node):
@@ -125,9 +126,12 @@ class AlarmNode(Node):
                     self.publish_bool(False)
         if self.debug and self.det.time_s >= self.next_debug:
             self.next_debug = self.det.time_s + 1.0
-            db, noise, sim, on = self.det.last
-            self.get_logger().info("level %.1f dB  noise %.1f dB  sim %.2f  match %s  overflows %d"
-                                   % (db, noise, sim, on, self.n_overflow))
+            m = self.det.summary()
+            self.get_logger().info(
+                "level %.1f dB (noise %.1f)  best sim %.2f (needs %.2f)  matched %3d%%  "
+                "buzzes %d/%d  overflows %d"
+                % (m["level"], m["noise"], m["best_sim"], self.det.sim_thr, 100 * m["matched"],
+                   m["buzzes"], self.det.n_required, self.n_overflow))
 
     def close(self):
         if self.stream is not None:
