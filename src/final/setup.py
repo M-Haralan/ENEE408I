@@ -25,7 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'alarm_node = final.alarm_node:main',
-            'dstar_nav = dstar_navigation:main'
+            'dstar_nav = final.dstar_navigation:main',
+            'dstar_monitor = final.dstar_cartographer:main'
         ],
     },
 )
