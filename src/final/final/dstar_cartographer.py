@@ -239,7 +239,10 @@ class DStarCartographer(Node):
     def __init__(self):
         super().__init__('dstar_cartographer')
         from nav_msgs.msg import Path
-        self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
+        self.create_subscription(OccupancyGrid, '/map', self.map_callback, QoSProfile(
+            depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Path, '/dstar_active_path', self.path_callback, 10)
         self.create_subscription(PoseStamped, '/move_base_simple/goal', self.goal_callback, 10)
         self.create_subscription(PoseStamped, '/goal_pose', self.goal_callback, 10)

@@ -1,7 +1,11 @@
-"""Simulation-only TurtleBot3 D* Lite navigation and conservative frontier exploration.
+"""TurtleBot3 D* Lite navigation and conservative frontier exploration (real hardware).
 
-Run alongside Cartographer and optionally dstar_cartographer.py (read-only monitor).
-One controller must own /cmd_vel. Ctrl+C stops the robot. Use only in simulation.
+Run on the PC (same ROS_DOMAIN_ID as the Jetson container) alongside the TurtleBot3
+bringup and Cartographer, and optionally dstar_cartographer.py (read-only monitor).
+One controller must own /cmd_vel. Ctrl+C stops the robot.
+Real-robot changes vs. sim: sensor-data QoS for /scan, latched /map, lower default
+speeds (ROS parameters), cmd_vel watchdog, zero-range LiDAR readings treated as invalid.
+Start with the robot on blocks or with a hand on the e-stop for the first run.
 """
 import math
 import time
@@ -14,7 +18,10 @@ from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformListener
 
-from dstar_cartographer import DStarLite, find_frontiers, render_active_path
+from rclpy.qos import (QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy,
+                       qos_profile_sensor_data)
+
+from final.dstar_cartographer import DStarLite, find_frontiers, render_active_path
 
 
 class DStarNavigation(Node):
@@ -36,11 +43,23 @@ class DStarNavigation(Node):
 
     def __init__(self):
         super().__init__('dstar_navigation')
-        self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        # Tunable at launch: --ros-args -p max_linear:=0.10 -p use_sim_time:=false
+        self.MAX_LINEAR = self.declare_parameter('max_linear', self.MAX_LINEAR).value
+        self.MAX_ANGULAR = self.declare_parameter('max_angular', self.MAX_ANGULAR).value
+        self.FRONT_STOP_M = self.declare_parameter('front_stop_m', self.FRONT_STOP_M).value
+        self.CLEARANCE_M = self.declare_parameter('clearance_m', self.CLEARANCE_M).value
+        self.base_frame = self.declare_parameter('base_frame', 'base_link').value
+        self.map_frame = self.declare_parameter('map_frame', 'map').value
+        # Cartographer publishes /map as transient-local; match it so we get the
+        # latest map immediately instead of waiting for the next update.
+        map_qos = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(OccupancyGrid, '/map', self.map_callback, map_qos)
         # Different RViz versions/configurations publish on either topic.
         self.create_subscription(PoseStamped, '/move_base_simple/goal', self.goal_callback, 10)
         self.create_subscription(PoseStamped, '/goal_pose', self.goal_callback, 10)
-        self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        # The real LDS driver publishes BEST_EFFORT; a default (reliable) subscriber never matches it.
+        self.create_subscription(LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.path_pub = self.create_publisher(Path, '/dstar_active_path', 10)
         self.tf_buffer = Buffer()
@@ -158,7 +177,8 @@ class DStarNavigation(Node):
                 continue
             if math.isinf(reading) and reading > 0:
                 forward.append(msg.range_max)
-            elif math.isfinite(reading) and msg.range_min <= reading <= msg.range_max:
+            elif (math.isfinite(reading) and reading > 0.0
+                  and msg.range_min <= reading <= msg.range_max):
                 forward.append(reading)
         self.front_distance = min(forward) if forward else None
         self.scan_at = time.monotonic()
@@ -169,7 +189,7 @@ class DStarNavigation(Node):
 
     def pose(self):
         try:
-            tf = self.tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
+            tf = self.tf_buffer.lookup_transform(self.map_frame, self.base_frame, rclpy.time.Time())
         except Exception:
             return None
         p, q = tf.transform.translation, tf.transform.rotation
@@ -453,7 +473,7 @@ class DStarNavigation(Node):
         pose = self.pose()
         if pose is None:
             self.stop()
-            self.notice('STOP: waiting for map -> base_link TF.')
+            self.notice('STOP: waiting for map -> base_link TF (is Cartographer running?).')
             return
         x, y, yaw = pose
         if math.dist((x,y), self.goal_xy) < 0.12:

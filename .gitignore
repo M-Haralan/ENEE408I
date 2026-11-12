@@ -4,4 +4,4 @@ lab_env*
 log*
 *.png
 .vscode*
-*__pycache__
+*__pycache__*
